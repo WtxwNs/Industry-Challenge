@@ -126,7 +126,7 @@ AicAdapterNode::AicAdapterNode() : Node("aic_adapter_node") {
 
 void AicAdapterNode::image_callback(size_t camera_idx,
                                     sensor_msgs::msg::Image::UniquePtr msg) {
-  if (camera_idx > images_.size()) {
+  if (camera_idx >= images_.size()) {
     RCLCPP_ERROR(this->get_logger(), "unexpected camera idx: %zu", camera_idx);
     return;
   }
