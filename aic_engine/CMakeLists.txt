@@ -60,4 +60,12 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_shell_utils test/test_shell_utils.cpp)
+  target_include_directories(test_shell_utils PRIVATE src)
+  target_compile_features(test_shell_utils PRIVATE cxx_std_17)
+  add_test(NAME shell_utils COMMAND test_shell_utils)
+endif()
+
 ament_package()

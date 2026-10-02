@@ -87,6 +87,8 @@ class AicModel(LifecycleNode):
             Empty, "cancel_task", self.cancel_task_callback
         )
         self.goal_handle = None
+        self._goal_lock = threading.Lock()
+        self._goal_pending = False
         self.is_active = False
         self.observation_sub = self.create_subscription(
             Observation, "observations", self.observation_callback, 10
@@ -163,22 +165,39 @@ class AicModel(LifecycleNode):
         self._observation_msg = msg
 
     def insert_cable_goal_callback(self, goal_request):
-        if not self.is_active:
-            self.get_logger().error("aic_model lifecycle is not in the active state")
-            return GoalResponse.REJECT
+        with self._goal_lock:
+            if not self.is_active:
+                self.get_logger().error(
+                    "aic_model lifecycle is not in the active state"
+                )
+                return GoalResponse.REJECT
 
-        if self.goal_handle is not None and self.goal_handle.is_active:
-            self.get_logger().error(
-                "A goal is active and must be canceled before a new insert_cable goal can begin"
-            )
-            return GoalResponse.REJECT
-        else:
+            if (
+                self._goal_pending
+                or self.goal_handle is not None
+                or (self._action_thread is not None and self._action_thread.is_alive())
+            ):
+                self.get_logger().error(
+                    "A previous goal or policy thread has not exited yet"
+                )
+                return GoalResponse.REJECT
+
+            # Reserve the slot before the accepted-goal callback runs. The action
+            # server uses a reentrant callback group, so requests can overlap.
+            self._goal_pending = True
             self.get_logger().info("Goal accepted")
             return GoalResponse.ACCEPT
 
     def insert_cable_accepted_goal_callback(self, goal_handle):
-        self.goal_handle = goal_handle
-        self.goal_handle.execute()
+        with self._goal_lock:
+            self.goal_handle = goal_handle
+            self._goal_pending = False
+        goal_handle.execute()
+
+    def release_goal(self, goal_handle):
+        with self._goal_lock:
+            if self.goal_handle is goal_handle:
+                self.goal_handle = None
 
     def insert_cable_cancel_callback(self, goal_handle):
         self.get_logger().info("Received insert_cable cancel request")
@@ -233,17 +252,41 @@ class AicModel(LifecycleNode):
         feedback_msg.message = feedback
         goal_handle.publish_feedback(feedback_msg)
 
-    def action_thread_func(self, goal_handle: ServerGoalHandle):
-        self._action_thread_result = self._policy.insert_cable(
-            task=goal_handle.request.task,
-            get_observation=lambda: self.observation_callable(),
-            move_robot=lambda motion_update=None, joint_motion_update=None: self.move_robot(
-                motion_update, joint_motion_update
-            ),
-            send_feedback=lambda feedback: self.send_feedback(goal_handle, feedback),
+    def policy_goal_is_active(self, goal_handle: ServerGoalHandle):
+        return (
+            self.is_active
+            and self.goal_handle is goal_handle
+            and goal_handle.is_active
+            and not goal_handle.is_cancel_requested
         )
-        if self._action_thread_result is None:
-            self.get_logger().warn("insert_cable() returned None. Assuming False...")
+
+    def move_robot_for_goal(
+        self, goal_handle, motion_update=None, joint_motion_update=None
+    ):
+        if not self.policy_goal_is_active(goal_handle):
+            return False
+        return self.move_robot(motion_update, joint_motion_update)
+
+    def send_feedback_for_goal(self, goal_handle, feedback):
+        if self.policy_goal_is_active(goal_handle):
+            self.send_feedback(goal_handle, feedback)
+
+    def action_thread_func(self, goal_handle: ServerGoalHandle):
+        try:
+            self._action_thread_result = bool(
+                self._policy.insert_cable(
+                    task=goal_handle.request.task,
+                    get_observation=lambda: self.observation_callable(),
+                    move_robot=lambda motion_update=None, joint_motion_update=None: self.move_robot_for_goal(
+                        goal_handle, motion_update, joint_motion_update
+                    ),
+                    send_feedback=lambda feedback: self.send_feedback_for_goal(
+                        goal_handle, feedback
+                    ),
+                )
+            )
+        except Exception as ex:
+            self.get_logger().error(f"insert_cable() failed: {ex}")
             self._action_thread_result = False
 
     async def insert_cable_execute_callback(self, goal_handle: ServerGoalHandle):
@@ -281,7 +324,7 @@ class AicModel(LifecycleNode):
                 self.get_logger().info(
                     "Exiting insert_cable execute loop due to cancellation request."
                 )
-                self.goal_handle = None
+                self.release_goal(goal_handle)
                 return result
 
             # Check if the goal was aborted via the cancel_task service,
@@ -293,7 +336,7 @@ class AicModel(LifecycleNode):
                 self.get_logger().info(
                     "Exiting insert_cable execute loop due to cancel_task request."
                 )
-                self.goal_handle = None
+                self.release_goal(goal_handle)
                 return result
 
             # Check if the task has been completed.
@@ -301,10 +344,13 @@ class AicModel(LifecycleNode):
                 self.get_logger().info(
                     f"insert_cable() returned {self._action_thread_result}"
                 )
-                goal_handle.succeed()
+                if self._action_thread_result:
+                    goal_handle.succeed()
+                else:
+                    goal_handle.abort()
                 result = InsertCable.Result()
                 result.success = self._action_thread_result
-                self.goal_handle = None
+                self.release_goal(goal_handle)
                 return result
 
         self.get_logger().info("Exiting insert_cable execute loop")

@@ -34,6 +34,7 @@
 #include "lifecycle_msgs/srv/get_state.hpp"
 #include "rclcpp/subscription_options.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "shell_utils.hpp"
 
 namespace aic {
 
@@ -1769,7 +1770,12 @@ bool Engine::spawn_entity(Trial& trial, std::string entity_name,
 
   // Build xacro command with parameters from config
   std::stringstream cmd;
-  cmd << "xacro " << xacro_file;
+  const auto quoted_xacro_file = QuoteShellArgument(xacro_file);
+  if (!quoted_xacro_file) {
+    RCLCPP_ERROR(node_->get_logger(), "Invalid xacro file path");
+    return false;
+  }
+  cmd << "xacro " << *quoted_xacro_file;
 
   const auto& config = trial.config["scene"][entity_name];
 
@@ -1783,7 +1789,13 @@ bool Engine::spawn_entity(Trial& trial, std::string entity_name,
 
     // Add cable type parameter
     std::string cable_type = config["cable_type"].as<std::string>();
-    cmd << " cable_type:=" << cable_type;
+    const auto quoted_cable_type =
+        QuoteShellArgument("cable_type:=" + cable_type);
+    if (!quoted_cable_type) {
+      RCLCPP_ERROR(node_->get_logger(), "Invalid cable type");
+      return false;
+    }
+    cmd << " " << *quoted_cable_type;
   } else if (entity_name == "task_board") {
     const auto& config = trial.config["scene"][entity_name];
     // Read task board limits from config

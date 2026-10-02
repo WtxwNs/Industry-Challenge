@@ -57,5 +57,5 @@ docker compose -f docker/docker-compose.yaml build
 
 Next, run them:
 ```
-docker copose -f docker/docker-compose.yaml up
+docker compose -f docker/docker-compose.yaml up
 ```
